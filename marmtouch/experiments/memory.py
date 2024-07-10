@@ -9,6 +9,7 @@ from marmtouch.experiments.base import Experiment
 from marmtouch.experiments.mixins.task_components.delay import DelayMixin
 from marmtouch.experiments.trialrecord import TrialRecord
 from marmtouch.experiments.util.events import get_first_tap, was_tapped
+from marmtouch.util.parse_csv import parse_csv
 
 
 class Memory(Experiment, DelayMixin):
@@ -66,6 +67,10 @@ class Memory(Experiment, DelayMixin):
         If True, touches outside of the target and distractors are ignored.
         Otherwise, touches outside of the target and distractors are treated
         as incorrect.
+    skip_cue: bool, default False
+        If True, skips the cue phase entirely and proceeds directly to the sample phase.
+    input_list: bool, default False
+        If True, reads stimuli from a CSV file instead of using single specific stimuli.
     """
 
     keys = (
@@ -97,37 +102,43 @@ class Memory(Experiment, DelayMixin):
     outcome_key = "sample_touch"
 
     def _show_cue(self, stimuli, timing):
-        self.screen.fill(self.background)
-        self.draw_stimulus(**stimuli["cue"])
-        self.flip()
 
-        info = {"touch": 0, "RT": 0}
-        self.clock.wait(timing["cue_duration"])
-        while self.clock.waiting():
-            tap = get_first_tap(self.event_manager.parse_events())
-            if not self.running:
-                return
-            if tap is not None:
-                if "window" in stimuli["cue"] and was_tapped(
-                    stimuli["cue"]["loc"], tap, stimuli["cue"]["window"]
-                ):
-                    info = {
-                        "touch": 1,
-                        "RT": self.clock.elapsed_time,
-                        "x": tap[0],
-                        "y": tap[1],
-                    }
-                    if self.options.get("cue_touch_enabled", False):
-                        break
-        return info
+        if self.options.get("skip_cue", False):
+            return {"touch": 0, "RT": 0}  # Return empty info if cue is skipped
+        else:
+            self.screen.fill(self.background)
+            self.draw_stimulus(**stimuli["cue"])
+            self.flip() 
+
+            info = {"touch": 0, "RT": 0}
+            self.clock.wait(timing["cue_duration"])
+            while self.clock.waiting():
+                tap = get_first_tap(self.event_manager.parse_events())
+                if not self.running:
+                    return
+                if tap is not None:
+                    if "window" in stimuli["cue"] and was_tapped(
+                        stimuli["cue"]["loc"], tap, stimuli["cue"]["window"]
+                    ):
+                        info = {
+                            "touch": 1,
+                            "RT": self.clock.elapsed_time,
+                            "x": tap[0],
+                            "y": tap[1],
+                        }
+                        if self.options.get("cue_touch_enabled", False):
+                            break
+            return info
+
 
     def _show_sample(self, stimuli, timing, show_cue=False):
         self.screen.fill(self.background)
         if show_cue:
             self.draw_stimulus(**stimuli["cue"])
         self.draw_stimulus(**stimuli["target"])
-        for distractor in stimuli["distractors"]:
-            self.draw_stimulus(**distractor)
+        if stimuli["distractors"] is not None:
+            for distractor in stimuli["distractors"]:
+                self.draw_stimulus(**distractor)
         self.flip()
 
         info = {"touch": 0, "RT": 0}
@@ -170,10 +181,11 @@ class Memory(Experiment, DelayMixin):
                         "y": tap[1],
                     }
 
-                    for distractor in stimuli["distractors"]:
-                        if was_tapped(distractor["loc"], tap, distractor["window"]):
-                            info["tapped"] = distractor["name"]
-                            break
+                    if stimuli["distractors"] is not None:
+                        for distractor in stimuli["distractors"]:
+                            if was_tapped(distractor["loc"], tap, distractor["window"]):
+                                info["tapped"] = distractor["name"]
+                                break
                     else:
                         info["tapped"] = "outside"
                         if self.options.get("ignore_outside", False):
@@ -200,20 +212,127 @@ class Memory(Experiment, DelayMixin):
         return info
 
     def get_stimuli(self, condition):
-        stimuli = {
-            stimulus: self.get_item(self.conditions[condition][stimulus])
-            for stimulus in ["cue", "target", "correct", "incorrect"]
-        }
-        stimuli["distractors"] = [
-            self.get_item(distractor)
-            for distractor in self.conditions[condition]["distractors"]
-        ]
-        if "delay_distractor" in self.conditions[condition]:
-            stimuli["delay_distractor"] = self.get_item(
-                self.conditions[condition]["delay_distractor"]
-            )
+        if self.options.get("input_list", False):
+            # Parse the CSV file to get the stimuli list
+            stimuli_list = parse_csv(self.items)
+            
+            # Organize stimuli by their classes (including their names)
+            stimuli_by_class = {
+                "face_left": [s for s in stimuli_list if s["class"] == "face_left"],
+                "face_right": [s for s in stimuli_list if s["class"] == "face_right"],
+                "scrambled_left": [s for s in stimuli_list if s["class"] == "scrambled_left"],
+                "scrambled_right": [s for s in stimuli_list if s["class"] == "scrambled_right"],
+                "sound_a": [s for s in stimuli_list if s["class"] == "sound_a"],
+                "sound_b": [s for s in stimuli_list if s["class"] == "sound_b"]
+            }
+            
+            # Get the condition-specific stimuli requirements
+            condition_spec = self.conditions[condition]
+            
+            # Randomly select the target, distractor, cue, correct, and incorrect stimuli based on the condition
+            target_class = condition_spec["target"]
+            cue_class = condition_spec["cue"]
+            correct_class = condition_spec["correct"]
+            incorrect_class = condition_spec["incorrect"]
+
+            target = random.choice(stimuli_by_class[target_class])
+            correct = random.choice(stimuli_by_class[correct_class])
+            incorrect = random.choice(stimuli_by_class[incorrect_class])
+
+            # Load the audio file if the cue is audio
+            if cue_class in stimuli_by_class and stimuli_by_class[cue_class]:
+                cue = random.choice(stimuli_by_class[cue_class])
+                # Load the sound file
+                if cue["type"] == "audio":
+                    cue_sound = pygame.mixer.Sound(cue["path"])
+                else:
+                    cue_sound = None  # Handle other types of stimuli
+
+            # Handle distractors if defined in the condition
+            distractors = []
+            if "distractors" in condition_spec and condition_spec["distractors"]:
+                distractor_classes = condition_spec["distractors"]
+                for distractor_class in distractor_classes:
+                    if distractor_class in stimuli_by_class and stimuli_by_class[distractor_class]:
+                        distractors.append(random.choice(stimuli_by_class[distractor_class]))
+
+
+            if self.options.get("skip_cue", False):
+                cue = None
+                correct = target
+                incorrect = random.choice([stim for stim in stimuli_list if stim != target and stim["class"] == incorrect_class])
+
+            def parse_loc(locx, locy):
+                try:
+                    loc = (float(locx), float(locy))
+                    return loc
+                except ValueError:
+                    return None
+                
+            def parse_window(winx, winy):
+                try:
+                    window = (float(winx), float(winy))
+                    return window
+                except ValueError:
+                    return None
+
+            # Construct the stimuli dictionary
+            stimuli = {
+                "cue": {
+                    "type": cue["type"],
+                    "name": cue["name"],
+                    "sound": cue_sound
+                } if cue else None,
+                "target": {
+                    "type": target["type"],
+                    "loc": parse_loc(target["loc_x"], target["loc_y"]),
+                    "window": parse_window(target["win_x"], target["win_y"]),
+                    "name": target["name"],
+                    "image": pygame.image.load(target["path"])
+                },
+                "correct": {
+                    "type": correct["type"],
+                    "loc": parse_loc(correct["loc_x"], correct["loc_y"]),
+                    "window": parse_window(correct["win_x"], correct["win_y"]),
+                    "name": correct["name"],
+                    "image": pygame.image.load(correct["path"])
+                },
+                "incorrect": {
+                    "type": incorrect["type"],
+                    "loc": parse_loc(incorrect["loc_x"], incorrect["loc_y"]),
+                    "window": parse_window(incorrect["win_x"], incorrect["win_y"]),                    
+                    "name": incorrect["name"],
+                    "image": pygame.image.load(incorrect["path"])
+                },
+                "distractors": [
+                    {
+                        "type": distractor["type"],
+                        "loc": parse_loc(distractor["loc_x"], distractor["loc_y"]),
+                        "window": parse_window(distractor["win_x"], distractor["win_y"]),
+                        "name": distractor["name"],
+                        "image": pygame.image.load(distractor["path"])
+                    } for distractor in distractors
+                ] if distractors else None
+            }
         else:
-            stimuli["delay_distractor"] = None
+            # Default behavior: get stimuli from predefined configuration
+            stimuli = {
+                stimulus: self.get_item(self.conditions[condition][stimulus])
+                for stimulus in ["cue", "target", "correct", "incorrect"]
+            }
+            if "distractors" in self.conditions[condition]:
+                stimuli["distractors"] = [
+                    self.get_item(distractor)
+                    for distractor in self.conditions[condition]["distractors"]
+                ]
+
+            if "delay_distractor" in self.conditions[condition]:
+                stimuli["delay_distractor"] = self.get_item(
+                    self.conditions[condition]["delay_distractor"]
+                )
+            else:
+                stimuli["delay_distractor"] = None
+                
         return stimuli
 
     def get_timing(self, condition):
@@ -343,6 +462,7 @@ class Memory(Experiment, DelayMixin):
                 break
             trial += 1
             self.update_condition_list(outcome)
+    
     def _test_trial(self, test):
         self._setup_test_trial(test)
         self.update_info(test['trial'])
